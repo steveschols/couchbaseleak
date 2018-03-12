@@ -13,18 +13,25 @@ import com.couchbase.client.java.view.AsyncViewRow;
 import com.couchbase.client.java.view.Stale;
 import com.couchbase.client.java.view.ViewQuery;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import rx.Observable;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import static java.util.stream.Collectors.toList;
+
 /**
  * Test program that indicates a leak in couchbase using large datasets and AsyncBuckets.
  */
 public class CouchbaseLeak {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(CouchbaseLeak.class);
 
     private static final List<String> CLUSTER_HOSTS = Arrays.asList("valvconsultcbqas04", "valvconsultcbqas05", "valvconsultcbqas06");
     private static final String BUCKET = "orders";
@@ -40,14 +47,14 @@ public class CouchbaseLeak {
 
     private void executeQuery() {
         ResourceLeakDetector.setLevel(ResourceLeakDetector.Level.PARANOID);
+
         CouchbaseEnvironment couchbaseEnvironment = DefaultCouchbaseEnvironment
-            .builder()
-            .bootstrapCarrierEnabled(false)
-            .autoreleaseAfter(5000)
-            .connectTimeout(20000)
-//                .queryEnabled(true)
-            .queryTimeout(60000)
-            .build();
+                .builder()
+                .bootstrapCarrierEnabled(false)
+                .autoreleaseAfter(5000)
+                .connectTimeout(20000)
+                .queryTimeout(60000)
+                .build();
 
         CouchbaseCluster couchbaseCluster = CouchbaseCluster.create(couchbaseEnvironment, CLUSTER_HOSTS);
         Bucket bucket = couchbaseCluster.openBucket(BUCKET, PWD);
@@ -62,43 +69,43 @@ public class CouchbaseLeak {
     private boolean printPage(ViewQuery viewQuery, Bucket bucket, int pageNumber) {
         // Execute paginated query.
         List<SummaryInView> summaryInViews = bucket.async()
-            .query(viewQuery)
-            .flatMap(this::extractRowsOrError)
-            .map(val -> mapValueKeyPair(val, SummaryInView.class))
-            .skip(pageNumber)
-            .limit(PAGE_SIZE)
-            .toList()       //Get list
-            .toBlocking()   //Get list
-            .single()       //Get list
-            .stream()
-            .map(Map.Entry::getValue)
-            .collect(Collectors.toList());
+                .query(viewQuery)
+                .flatMap(this::extractRowsOrError)
+                .map(val -> mapValueKeyPair(val, SummaryInView.class))
+                .skip(pageNumber)
+                .limit(PAGE_SIZE)
+//                .subscribe(jsonArraySummaryInViewEntry -> summaryInViews.add(jsonArraySummaryInViewEntry.getValue()));
+                .toList()       //Get list
+                .toBlocking()   //Get list
+                .single()       //Get list
+                .stream()
+                .map(Map.Entry::getValue)
+                .collect(toList());
 
         if (summaryInViews.isEmpty()) {
-            System.out.println("## No more results.");
+            LOGGER.debug("## No more results.");
             return false;
         }
 
         AtomicInteger index = new AtomicInteger();
-        summaryInViews.forEach(view -> System.out.println(
-            "Page: " + pageNumber + ", item: " + index.getAndIncrement() + " [---]"));
+        summaryInViews.forEach(view -> LOGGER.debug("Page: " + pageNumber + ", item: " + index.getAndIncrement() + " [---]"));
         return true;
     }
 
     private ViewQuery viewQueryFor(String doctorNumber) {
         return ViewQuery.from(ORDER_DESIGN_DOC_NAME_5, ORDER_DESIGN_DOC_ALL_ORDERS_ORDERDATE_VIEW)
-            .stale(Stale.FALSE)
-            .descending(true)
-            .reduce(false)
-            .startKey(JsonArray.from(doctorNumber, JsonObject.empty()))
-            .endKey(JsonArray.from(doctorNumber, null));
+                .stale(Stale.FALSE)
+                .descending(true)
+                .reduce(false)
+                .startKey(JsonArray.from(doctorNumber, JsonObject.empty()))
+                .endKey(JsonArray.from(doctorNumber, null));
     }
 
     private Observable<AsyncViewRow> extractRowsOrError(AsyncViewResult viewResult) {
         if (viewResult.success()) {
             return viewResult.rows();
         } else {
-            System.out.println("==> viewResult error! <===");
+            LOGGER.debug("==> viewResult error! <===");
             return viewResult.error().flatMap(e -> Observable.error(new RuntimeException(e.toString())));
         }
     }
