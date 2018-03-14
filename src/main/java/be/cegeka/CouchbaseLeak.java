@@ -16,11 +16,13 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import rx.Observable;
+import rx.Subscriber;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -29,6 +31,7 @@ import static java.util.stream.Collectors.toList;
 /**
  * Test program that indicates a leak in couchbase using large datasets and AsyncBuckets.
  */
+@SuppressWarnings("Duplicates")
 public class CouchbaseLeak {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CouchbaseLeak.class);
@@ -49,19 +52,19 @@ public class CouchbaseLeak {
         ResourceLeakDetector.setLevel(ResourceLeakDetector.Level.PARANOID);
 
         CouchbaseEnvironment couchbaseEnvironment = DefaultCouchbaseEnvironment
-                .builder()
-                .bootstrapCarrierEnabled(false)
-                .autoreleaseAfter(5000)
-                .connectTimeout(20000)
-                .queryTimeout(60000)
-                .build();
+            .builder()
+            .bootstrapCarrierEnabled(false)
+            .autoreleaseAfter(2000)
+            .connectTimeout(20000)
+            .queryTimeout(60000)
+            .build();
 
         CouchbaseCluster couchbaseCluster = CouchbaseCluster.create(couchbaseEnvironment, CLUSTER_HOSTS);
         Bucket bucket = couchbaseCluster.openBucket(BUCKET, PWD);
         ViewQuery viewQuery = viewQueryFor("11740");
 
         int pageNum = 1;
-        while (printPage(viewQuery, bucket, pageNum)) {
+        while (printPage2(viewQuery, bucket, pageNum)) {
             pageNum += 1;
         }
     }
@@ -69,18 +72,20 @@ public class CouchbaseLeak {
     private boolean printPage(ViewQuery viewQuery, Bucket bucket, int pageNumber) {
         // Execute paginated query.
         List<SummaryInView> summaryInViews = bucket.async()
-                .query(viewQuery)
-                .flatMap(this::extractRowsOrError)
-                .map(val -> mapValueKeyPair(val, SummaryInView.class))
-                .skip(pageNumber)
-                .limit(PAGE_SIZE)
+            .query(viewQuery)
+//            .timeout(30, TimeUnit.SECONDS)
+            .flatMap(this::extractRowsOrError)
+            .publish().autoConnect()
+            .map(val -> mapValueKeyPair(val, SummaryInView.class))
+            .skip(pageNumber)
+            .limit(PAGE_SIZE)
 //                .subscribe(jsonArraySummaryInViewEntry -> summaryInViews.add(jsonArraySummaryInViewEntry.getValue()));
-                .toList()       //Get list
-                .toBlocking()   //Get list
-                .single()       //Get list
-                .stream()
-                .map(Map.Entry::getValue)
-                .collect(toList());
+            .toList()       //Get list
+            .toBlocking()   //Get list
+            .single()       //Get list
+            .stream()
+            .map(Map.Entry::getValue)
+            .collect(toList());
 
         if (summaryInViews.isEmpty()) {
             LOGGER.debug("## No more results.");
@@ -92,13 +97,53 @@ public class CouchbaseLeak {
         return true;
     }
 
+    private boolean printPage2(ViewQuery viewQuery, Bucket bucket, int pageNumber) {
+        // Execute paginated query.
+        AtomicInteger index = new AtomicInteger();
+        bucket.async()
+            .query(viewQuery)
+            .flatMap(this::extractRowsOrError)
+            .publish().autoConnect()
+            .map(val -> mapValueKeyPair(val, SummaryInView.class))
+            .skip(pageNumber)
+            .limit(PAGE_SIZE)
+            .map(Map.Entry::getValue)
+            .subscribe(new Subscriber<SummaryInView>() {
+
+                           @Override
+                           public void onStart() {
+                                request(PAGE_SIZE);
+                           }
+
+                           @Override
+                           public void onCompleted() {
+                               LOGGER.info("Done");
+                           }
+
+                           @Override
+                           public void onError(Throwable e) {
+//                               LOGGER.error("Error receiving pages: ", e);
+                           }
+
+                           @Override
+                           public void onNext(SummaryInView summaryInView) {
+                               LOGGER.debug("Page: " + pageNumber + ", item: " + index.getAndIncrement() + " [---]");
+//                               request(PAGE_SIZE);
+                           }
+                       }
+
+            );
+
+        return true;
+    }
+
     private ViewQuery viewQueryFor(String doctorNumber) {
         return ViewQuery.from(ORDER_DESIGN_DOC_NAME_5, ORDER_DESIGN_DOC_ALL_ORDERS_ORDERDATE_VIEW)
-                .stale(Stale.FALSE)
-                .descending(true)
-                .reduce(false)
-                .startKey(JsonArray.from(doctorNumber, JsonObject.empty()))
-                .endKey(JsonArray.from(doctorNumber, null));
+            .stale(Stale.FALSE)
+            .descending(true)
+            .reduce(false)
+            .startKey(JsonArray.from(doctorNumber, JsonObject.empty()))
+            .endKey(JsonArray.from(doctorNumber, null));
     }
 
     private Observable<AsyncViewRow> extractRowsOrError(AsyncViewResult viewResult) {
